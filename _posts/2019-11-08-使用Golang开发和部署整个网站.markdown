@@ -1,0 +1,355 @@
+---
+layout: post
+title:  "使用Golang开发和部署整个网站"
+author: Derrick ZHU
+date:   2019-11-08 10:56:32 +0800
+categories: golang website
+---
+我认为Golang是网络开发中一个很好的选择：
+
+- 用它更容易实现非阻塞请求和并发
+- 它不需要其他任何额外的运行时环境和依赖，就能够很轻松的实现代码测试，同时部署也变得很简单（集装箱化在这里没有用武之地）。
+- 部署Golang服务不需要任何额外像Apache或者Nginx这样的前端HTTP服务器，其自身就有一个很好的标准服务器开发库。
+- 它并不强迫您使用其他的网络框架，因为所有网络开发所需要的都已经在标准库里准备好了。
+
+多年来，缺少围绕Golang一直有一个问题，缺少相应的开发库和教程。不过现在这个情况已经不是问题了。 让我向你展示在Golang中从A到Z构建网站并将其部署到Linux服务器上的步骤。 
+
+## 基础
+
+假设你正在开发一个名为`love-moutains`的基本HTML网络页面。正如你可能已经知道，`love-moutains`会在一个函数中完成渲染过程，并且你需要在网络服务器中通过一个路由(route)指向这个函数。我们将通过一个基础模板来渲染这个页面，在网站开发中，这是一个通过HTML模板化来呈现网页的好做法。这其中，从环境变量中，通过使用模板目录的路径读取模板参数也是一个很好的做法，这样有更好的灵活性。
+
+这里有一段Golang代码：
+
+```go
+package main
+
+import (
+    "html/template"
+    "net/http"
+)
+
+// Get path to template directory from env variable
+var templatesDir = os.Getenv("TEMPLATES_DIR")
+
+// loveMountains renders the love-mountains page after passing some data to the HTML template
+func loveMountains(w http.ResponseWriter, r *http.Request) {
+    // Build path to template
+    tmplPath := filepath.Join(templatesDir, "love-mountains.html")
+    // Load template from disk
+    tmpl := template.Must(template.ParseFiles(tmplPath))
+    // Inject data into template
+    data := "La Chartreuse"
+    tmpl.Execute(w, data)
+}
+
+func main() {
+    // Create route to love-mountains web page
+    http.HandleFunc("/love-mountains", loveMountains)
+    // Launch web server on port 80
+    http.ListenAndServe(":80", nil)
+}
+```
+{% raw %}
+在Go语言的模板中，通过表达式*{{.}}*能容易检索动态数据，这里是实现`love-moutains.html`的模板：
+{% endraw %}
+
+{% raw %}
+```html
+<h1>I Love Mountains<h1>
+<p>The mountain I prefer is {{.}}</p>
+```
+{% endraw %}
+
+## HTTP
+
+现在，在你的网站上实现HTTPS几乎已经成为强制性的要求。如何将Go网站切换到HTTPS？
+
+### 关联 TLS Certificates
+
+首先，以`.pem` 的格式颁布证书和私有密钥。你可以自己用`OpenSSL`自行颁布证书（不过，最终一个自签名的证书在浏览器中会出发一个证书有效性的警告）或者你也可以从一个可信的第三方机构购买证书，比如[*Let’s Encrypt*][2]。就我个人而言，我使用[*Let’s Encrypt*][2]和[*Certbot*][1]来颁布的证书，并且在服务器上自动更新这些证书。更多信息可以参考[这里][1]
+
+接下来，你需要告诉`Go`你的证书和私钥存放的路径。我正在从环境变量中找到并加载这些文件。
+
+我们所使用的是`ListenAndServeTLS`函数，而不仅仅是`ListenAndServe`:
+
+```go
+[...]
+
+// Load TLS cert info from env variables
+var tlsCertPath = os.Getenv("TLS_CERT_PATH")
+var tlsKeyPath = os.Getenv("TLS_KEY_PATH")
+
+[...]
+
+func main() {
+    [...]
+    // Serve HTTPS on port 443
+    http.ListenAndServeTLS(":443", tlsCertPath, tlsKeyPath, nil)
+}
+```
+
+### 强制`HTTPS`重定向
+
+现在，我们有一个同时监听端口**443**和**80**的网站。使用*301*将用户的**80**请求很好的自动重定向到**443**端口。同样，我们也需要生成一个新的`goroutine`，专门用来将`http://`重定向到`https://`（其原理类似`Ngnix`这样的前端服务器中所做的操作）。这里可以看到它是如何做到的：
+
+```go
+[...]
+
+// httpsRedirect redirects HTTP requests to HTTPS
+func httpsRedirect(w http.ResponseWriter, r *http.Request) {
+    http.Redirect(
+        w, r,
+        "https://"+r.Host+r.URL.String(),
+        http.StatusMovedPermanently,
+    )
+}
+
+func main() {
+    [...]
+    // Catch potential HTTP requests and redirect them to HTTPS
+    go http.ListenAndServe(":80", http.HandlerFunc(httpsRedirect))
+    // Serve HTTPS on port 443
+    http.ListenAndServeTLS(":443", tlsCertPath, tlsKeyPath, nil)
+}
+```
+
+## 静态资源
+
+为存储在磁盘上的静态资源（如图像、视频、Javascript文件、CSS文件等）提供文件服务相当容易，但屏蔽目录列表有点麻烦。
+
+### 从磁盘中读取文件
+
+在`Go`中，用`http.FileServer`提供文件系统服务是最安全的方法。比如，假设我们在`static`这个目录中存放了静态文件，并且要通过`https://my-website/static`来访问这些静态资源文件，下面是我们提供的办法：
+
+```go
+[...]
+http.Handle("/", http.FileServer(http.Dir("static")))
+[...]
+```
+
+### 组织目录列表
+
+默认情况下，`http.FileServer`提供全目录列表服务，这表示通过`https://my-website/static`这个链接可以获得完整的静态文件资源列表。出于安全和知识产权的原因，我们不希望这样做。
+
+为了能够屏蔽目录列表，需要创建一个自定义的`FileSystem`。接下来我们来创建一个实现`http.FileSystem`的结构体。根据这个接口类，结构体需要实现一个`Open()`函数。这个`Open()`函数首先检查文件或者目录是否存在，然后检查这是文件还是目录。如果这个路径是目录的话，函数给用户返回`文件不存在`（`file does not exist`）的*404*的HTTP错误。这样用户就可以无法知道自己是否访问的是目录。
+
+再一次，我们从环境变量中获得静态资源目录的路径。
+
+```go
+[...]
+
+// Get path to static assets directory from env variable
+var staticAssetsDir = os.Getenv("STATIC_ASSETS_DIR")
+
+// neuteredFileSystem is used to prevent directory listing of static assets
+type neuteredFileSystem struct {
+    fs http.FileSystem
+}
+
+func (nfs neuteredFileSystem) Open(path string) (http.File, error) {
+    // Check if path exists
+    f, err := nfs.fs.Open(path)
+    if err != nil {
+        return nil, err
+    }
+
+    // If path exists, check if is a file or a directory.
+    // If is a directory, stop here with an error saying that file
+    // does not exist. So user will get a 404 error code for a file or directory
+    // that does not exist, and for directories that exist.
+    s, err := f.Stat()
+    if err != nil {
+        return nil, err
+    }
+    if s.IsDir() {
+        return nil, os.ErrNotExist
+    }
+
+    // If file exists and the path is not a directory, let's return the file
+    return f, nil
+}
+
+func main() {
+    [...]
+    // Serve static files while preventing directory listing
+    mux := http.NewServeMux()
+    fs := http.FileServer(neuteredFileSystem{http.Dir(staticAssetsDir)})
+    mux.Handle("/", fs)
+    [...]
+}
+```
+
+## 完整例子
+
+事实上，整个网站代码是：
+
+```go
+package main
+
+import (
+    "html/template"
+    "net/http"
+    "os"
+    "path/filepath"
+)
+
+var staticAssetsDir = os.Getenv("STATIC_ASSETS_DIR")
+var templatesDir = os.Getenv("TEMPLATES_DIR")
+var tlsCertPath = os.Getenv("TLS_CERT_PATH")
+var tlsKeyPath = os.Getenv("TLS_KEY_PATH")
+
+// neuteredFileSystem is used to prevent directory listing of static assets
+type neuteredFileSystem struct {
+    fs http.FileSystem
+}
+
+func (nfs neuteredFileSystem) Open(path string) (http.File, error) {
+    // Check if path exists
+    f, err := nfs.fs.Open(path)
+    if err != nil {
+        return nil, err
+    }
+
+    // If path exists, check if is a file or a directory.
+    // If is a directory, stop here with an error saying that file
+    // does not exist. So user will get a 404 error code for a file/directory
+    // that does not exist, and for directories that exist.
+    s, err := f.Stat()
+    if err != nil {
+        return nil, err
+    }
+    if s.IsDir() {
+        return nil, os.ErrNotExist
+    }
+
+    // If file exists and the path is not a directory, let's return the file
+    return f, nil
+}
+
+// loveMountains renders love-mountains page after passing some data to the HTML template
+func loveMountains(w http.ResponseWriter, r *http.Request) {
+    // Load template from disk
+    tmpl := template.Must(template.ParseFiles("love-mountains.html"))
+    // Inject data into template
+    data := "Any dynamic data"
+    tmpl.Execute(w, data)
+}
+
+// httpsRedirect redirects http requests to https
+func httpsRedirect(w http.ResponseWriter, r *http.Request) {
+    http.Redirect(
+        w, r,
+        "https://"+r.Host+r.URL.String(),
+        http.StatusMovedPermanently,
+    )
+}
+
+func main() {
+    // http to https redirection
+    go http.ListenAndServe(":80", http.HandlerFunc(httpsRedirect))
+
+    // Serve static files while preventing directory listing
+    mux := http.NewServeMux()
+    fs := http.FileServer(neuteredFileSystem{http.Dir(staticAssetsDir)})
+    mux.Handle("/", fs)
+
+    // Serve one page site dynamic pages
+    mux.HandleFunc("/love-mountains", loveMountains)
+
+    // Launch TLS server
+    log.Fatal(http.ListenAndServeTLS(":443", tlsCertPath, tlsKeyPath, mux))
+}
+```
+
+加上模板文件`love-moutains.html`:
+
+{% raw %}
+```html
+<h1>I Love Mountains<h1>
+<p>The mountain I prefer is {{.}}</p>
+```
+{% endraw %}
+
+## 用`Systemd`进行测试、部署和守护进程
+
+从效率的角度来看，拥有一个简单而有效的测试/部署过程非常重要，而Go在这方面确实有所帮助。 Go在单个可执行文件中编译所有内容，包括所有依赖项（模板除外，但后者不是真正的依赖项，因此出于灵活性原因最好将它们分开）。 Go还附带了自己的前端HTTP服务器，因此不再需要安装*Nginx*或*Apache*。 因此，这很容易在本地测试您的应用程序，并确保它等同于服务器上的生产网站（当然，这里不是在谈论数据持久性……）。 然后，无需在构建/部署工作流中添加像Docker这样的容器系统！
+
+### 测试
+
+要在本地测试您的应用程序，请编译Go二进制文件，并使用适当的环境变量启动它，如下所示：
+
+```bash
+TEMPLATES_DIR=/local/path/to/templates/dir \
+STATIC_ASSETS_DIR=/local/path/to/static/dir \
+TLS_CERT_PATH=/local/path/to/cert.pem \
+TLS_KEY_PATH=/local/path/to/privkey.pem \
+./my_go_website
+```
+
+这样就完成了！你的站点就可以通过浏览器访问`https://127.0.0.1`访问了。
+
+### 部署
+
+部署只是将Go二进制文件复制到服务器（如果需要，还可以添加模板，静态资产和证书）。 像`scp`这样的简单工具非常适合。 您也可以使用`rsync`满足更高级的需求。
+
+### 使用Systemd守护程序
+
+您可以通过发出上述命令在服务器上启动网站，但是最好将网站作为服务（守护程序）启动，这样您的Linux系统会在启动时自动启动它（如果服务器重新启动）并尝试 重新启动它，以防您的应用崩溃。 在现代Linux发行版上，最好的方法是使用“ systemd”，这是专用于管理系统服务的默认工具。 那没什么要安装的！
+
+假设您将Go二进制文件放在服务器上的`/var/www`中。 在`systemd`目录中创建一个描述您的服务的新文件：`/etc/systemd/system/my_go_website.service`。 现在将以下内容放入其中：
+
+```bash
+[Unit]
+Description=my_go_website
+After=network.target auditd.service
+
+[Service]
+EnvironmentFile=/var/www/env
+ExecStart=/var/www/my_go_website
+ExecReload=/var/www/my_go_website
+KillMode=process
+Restart=always
+RestartPreventExitStatus=255
+Type=simple
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`EnvironmentFile`指令指向一个`env`文件，您可以在其中放置所有环境变量。 `systemd`负责加载它，并将环境变量传递给你的程序。 我把它放在`/var/www`中，但是可以把它放在其他地方。 这是您的`env`文件的样子：
+
+```bash
+TEMPLATES_DIR=/remote/path/to/templates/dir
+STATIC_ASSETS_DIR=/remote/path/to/static/dir
+TLS_CERT_PATH=/remote/path/to/cert.pem
+TLS_KEY_PATH=/remote/path/to/privkey.pem
+```
+
+也阅读有关`systemd`的更多信息，以获取有关上述配置的更多详细信息。
+
+现在：
+
+- `systemctl enable my_go_website` 把你的网站程序链接到`systemd`
+- `systemctl start my_go_website`  启动你的网站程序
+- `systemctl restart my_go_website`  命令可以重新启动服务
+- `systemctl stop my_go_website`  命令可以停止网络程序的服务。
+
+## 用WebAssembly（Wasm）替换Javascript
+
+如果您喜欢冒险，这里有一个额外的奖金部分！
+
+从Go版本1.11开始，您现在可以编译 [Go to Web Assembly（Wasm）][3]。 Wasm可以替代Javascript，这非常酷。 换句话说，您可以在理论上将Javascript替换为Go的Wasm。
+
+在现代浏览器中支持Wasm，但这仍处于试验阶段。 就我个人而言，目前我仅将其作为概念验证，但从中期来看，它可能成为在Go中整个开发技术堆栈的好方法。 让我们等着看！
+
+## 结论
+
+现在，您知道了如何在Go中开发整个网站并将其部署在Linux服务器上。 不需要安装的前端服务器，没有依赖地狱，并且性能出色……不是很简单吗？
+
+如果您想学习如何使用Go和Vue.js构建单页应用（SPA），可以看一下我的另外一篇[文章][4]。
+
+
+[1]: https://certbot.eff.org/lets-encrypt/ubuntubionic-other "certbot"
+[2]: https://letsencrypt.org "Let's Encrypt"
+[3]: https://github.com/golang/go/wiki/WebAssembly "WebAssembly"
+[4]: https://juliensalinas.com/en/golang-API-backend-vuejs-SPA-frontend-docker-modern-application "Building a modern application with a Golang API backend + a Vue.js SPA frontend using Docker"
