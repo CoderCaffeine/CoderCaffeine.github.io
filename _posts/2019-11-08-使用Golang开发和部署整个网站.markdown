@@ -2,7 +2,7 @@
 layout: post
 title:  "使用Golang开发和部署整个网站"
 author: Derrick ZHU
-date:   2019-11-08 10:56:32 +0800
+date:   2019-11-08 11:48:32 +0800
 categories: golang website
 ---
 我认为Golang是网络开发中一个很好的选择：
@@ -347,6 +347,9 @@ TLS_KEY_PATH=/remote/path/to/privkey.pem
 现在，您知道了如何在Go中开发整个网站并将其部署在Linux服务器上。 不需要安装的前端服务器，没有依赖地狱，并且性能出色……不是很简单吗？
 
 如果您想学习如何使用Go和Vue.js构建单页应用（SPA），可以看一下我的另外一篇[文章][4]。
+
+## 原文
+[https://juliensalinas.com/en/develop-deploy-whole-website-golang/](https://juliensalinas.com/en/develop-deploy-whole-website-golang/)
 
 
 [1]: https://certbot.eff.org/lets-encrypt/ubuntubionic-other "certbot"
