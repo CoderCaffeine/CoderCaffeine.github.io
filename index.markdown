@@ -1,6 +1,1 @@
----
-# Feel free to add content and custom Front Matter to this file.
-# To modify the layout, see https://jekyllrb.com/docs/themes/#overriding-theme-defaults
-
-layout: home
----
+<attachment contenteditable="false" data-atts="%5B%5D" data-aid=".atts-42aa61bd-078d-46f2-b7cd-1d6786315880"></attachment><p>--- # Feel free to add content and custom Front Matter to this file. # To modify the layout, see https://jekyllrb.com/docs/themes/#overriding-theme-defaults layout: home ---</p><p><br></p>
